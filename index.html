@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>100×100 Pixel Canvas</title>
+  <style>
+    :root { --cell: 10; /* px per cell, 10 => canvas 1000×1000 */ }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0b0c0f; color: #e8eaed; }
+    header { padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: #111319; position: sticky; top: 0; z-index: 10; box-shadow: 0 2px 12px rgba(0,0,0,.25); }
+    header .spacer { flex: 1; }
+    select, button, input[type="number"] { background: #1b1f2a; color: #e8eaed; border: 1px solid #2a2f3a; border-radius: 10px; padding: 8px 10px; }
+    button { cursor: pointer; }
+    main { display: grid; place-items: center; padding: 16px; }
+    canvas { border: 1px solid #2a2f3a; border-radius: 12px; background: #0f1117; image-rendering: pixelated; touch-action: none; }
+    .legend { display:flex; gap:10px; flex-wrap: wrap; align-items:center; }
+    .swatch { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius: 8px; background:#161923; border:1px solid #252a36; }
+    .dot { width:14px; height:14px; border-radius:4px; border:1px solid #0005; }
+    .kbd { padding:2px 6px; border:1px solid #2a2f3a; border-radius:6px; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; background:#121520; color:#cbd5e1; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Pixel Canvas • 100×100 cells (each 100×100mm)</strong>
+    <div class="spacer"></div>
+
+    <label>
+      Active function:
+      <select id="functionSelect"></select>
+    </label>
+
+    <label>
+      Cell px:
+      <input id="cellSize" type="number" min="4" max="20" step="1" value="10" />
+    </label>
+
+    <button id="clearBtn">Clear</button>
+    <button id="undoBtn" title="⌘/Ctrl+Z">Undo</button>
+    <button id="redoBtn" title="⌘/Ctrl+Shift+Z">Redo</button>
+    <button id="saveBtn">Download JSON</button>
+    <button id="loadBtn">Load JSON</button>
+
+    <div class="legend" id="legend"></div>
+  </header>
+
+  <main>
+    <canvas id="grid"></canvas>
+  </main>
+
+  <input type="file" id="fileInput" accept="application/json" hidden />
+
+  <script>
+    // --- Config ---
+    const COLS = 100, ROWS = 100;
+    const FUNCTIONS = [
+      { key: 'empty', name: 'Empty', color: '#0f1117' },
+      { key: 'wall', name: 'Wall', color: '#64748b' },
+      { key: 'door', name: 'Door', color: '#f59e0b' },
+      { key: 'window', name: 'Window', color: '#60a5fa' },
+      { key: 'kitchen', name: 'Kitchen', color: '#10b981' },
+      { key: 'bath', name: 'Bath', color: '#8b5cf6' },
+      { key: 'bed', name: 'Bedroom', color: '#ef4444' },
+      { key: 'living', name: 'Living', color: '#22c55e' },
+    ];
+
+    // --- State ---
+    let cell = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--cell'));
+    const palette = new Map(FUNCTIONS.map((f, i) => [f.key, { idx: i, color: f.color, name: f.name }]));
+    let activeKey = 'wall';
+    const grid = new Uint16Array(COLS * ROWS); // store FUNCTION index per cell
+    const history = []; // stack of {idx, prev, next}
+    const redoStack = [];
+
+    // --- DOM ---
+    const canvas = document.getElementById('grid');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const select = document.getElementById('functionSelect');
+    const legend = document.getElementById('legend');
+    const clearBtn = document.getElementById('clearBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const loadBtn = document.getElementById('loadBtn');
+    const fileInput = document.getElementById('fileInput');
+    const undoBtn = document.getElementById('undoBtn');
+    const redoBtn = document.getElementById('redoBtn');
+    const cellSizeInput = document.getElementById('cellSize');
+
+    function resizeCanvas() {
+      canvas.width = COLS * cell;
+      canvas.height = ROWS * cell;
+      drawAll();
+    }
+
+    // Build UI
+    FUNCTIONS.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.key; opt.textContent = `${f.name}`; if (f.key===activeKey) opt.selected = true;
+      select.appendChild(opt);
+
+      const chip = document.createElement('div');
+      chip.className = 'swatch';
+      chip.innerHTML = `<span class="dot" style="background:${f.color}"></span>${f.name}`;
+      legend.appendChild(chip);
+    });
+
+    select.addEventListener('change', () => { activeKey = select.value; });
+    cellSizeInput.addEventListener('change', () => {
+      const v = Math.max(4, Math.min(20, parseInt(cellSizeInput.value)||10));
+      cell = v; document.documentElement.style.setProperty('--cell', v);
+      resizeCanvas();
+    });
+
+    // Helpers
+    function idxFromXY(x, y) { return y * COLS + x; }
+    function xyFromClient(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((clientX - rect.left) / rect.width * canvas.width / cell);
+      const y = Math.floor((clientY - rect.top) / rect.height * canvas.height / cell);
+      return { x: Math.max(0, Math.min(COLS-1, x)), y: Math.max(0, Math.min(ROWS-1, y)) };
+    }
+
+    function drawCell(x, y, funcIdx) {
+      ctx.fillStyle = FUNCTIONS[funcIdx].color;
+      ctx.fillRect(x*cell, y*cell, cell, cell);
+    }
+
+    function drawGridLines() {
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 0; x <= COLS; x++) {
+        ctx.moveTo(x*cell + 0.5, 0); ctx.lineTo(x*cell + 0.5, ROWS*cell);
+      }
+      for (let y = 0; y <= ROWS; y++) {
+        ctx.moveTo(0, y*cell + 0.5); ctx.lineTo(COLS*cell, y*cell + 0.5);
+      }
+      ctx.stroke();
+    }
+
+    function drawAll() {
+      // background
+      ctx.fillStyle = FUNCTIONS[0].color; // empty
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // cells
+      for (let y=0; y<ROWS; y++) {
+        for (let x=0; x<COLS; x++) {
+          const v = grid[idxFromXY(x,y)];
+          if (v !== 0) drawCell(x,y,v);
+        }
+      }
+      drawGridLines();
+    }
+
+    function paintAt(x, y, funcIdx) {
+      const i = idxFromXY(x,y);
+      const prev = grid[i];
+      if (prev === funcIdx) return; // no-op
+      grid[i] = funcIdx;
+      history.push({ i, prev, next: funcIdx });
+      redoStack.length = 0;
+      drawCell(x,y,funcIdx);
+      // redraw thin grid lines over this cell for crispness
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x*cell + 0.5, y*cell + 0.5, cell, cell);
+      ctx.restore();
+    }
+
+    function undo() {
+      const op = history.pop();
+      if (!op) return;
+      redoStack.push(op);
+      grid[op.i] = op.prev;
+      const x = op.i % COLS, y = Math.floor(op.i / COLS);
+      drawCell(x,y,op.prev);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x*cell + 0.5, y*cell + 0.5, cell, cell);
+      ctx.restore();
+    }
+
+    function redo() {
+      const op = redoStack.pop();
+      if (!op) return;
+      history.push(op);
+      grid[op.i] = op.next;
+      const x = op.i % COLS, y = Math.floor(op.i / COLS);
+      drawCell(x,y,op.next);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x*cell + 0.5, y*cell + 0.5, cell, cell);
+      ctx.restore();
+    }
+
+    // Pointer handling (click & drag paint, right-click = erase)
+    let painting = false;
+    let paintIdx = palette.get(activeKey).idx;
+
+    canvas.addEventListener('pointerdown', (e) => {
+      canvas.setPointerCapture(e.pointerId);
+      const {x,y} = xyFromClient(e.clientX, e.clientY);
+      paintIdx = (e.button === 2 || e.ctrlKey) ? 0 : palette.get(activeKey).idx;
+      painting = true; paintAt(x,y,paintIdx);
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!painting) return;
+      const {x,y} = xyFromClient(e.clientX, e.clientY);
+      paintAt(x,y,paintIdx);
+    });
+
+    window.addEventListener('pointerup', (e) => { painting = false; });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Keyboard shortcuts
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) redo(); else undo();
+        e.preventDefault();
+      }
+    });
+
+    undoBtn.addEventListener('click', undo);
+    redoBtn.addEventListener('click', redo);
+
+    clearBtn.addEventListener('click', () => {
+      grid.fill(0); history.length = 0; redoStack.length = 0; drawAll();
+    });
+
+    saveBtn.addEventListener('click', () => {
+      const data = { cols: COLS, rows: ROWS, functions: FUNCTIONS.map(f => ({key:f.key,name:f.name,color:f.color})), cells: Array.from(grid) };
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'pixel-canvas-100x100.json'; a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    loadBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const text = await f.text();
+      try {
+        const data = JSON.parse(text);
+        if (data.cols !== COLS || data.rows !== ROWS) throw new Error('Dimension mismatch');
+        const newGrid = new Uint16Array(data.cells.length);
+        data.cells.forEach((val, i) => {
+          newGrid[i] = (FUNCTIONS[val]) ? val : 0;
+        });
+        newGrid.forEach((v,i)=> grid[i]=v);
+        drawAll();
+      } catch (err) {
+        alert('Invalid file: ' + err.message);
+      } finally {
+        fileInput.value = '';
+      }
+    });
+
+    // Initial paint
+    resizeCanvas();
+  </script>
+
+  <footer style="padding:12px 16px; color:#94a3b8;">
+    Tips: Click & drag to paint. Right‑click (or hold Ctrl) to erase. <span class="kbd">Ctrl/⌘+Z</span> to undo, <span class="kbd">Ctrl/⌘+Shift+Z</span> to redo.
+  </footer>
+</body>
+</html>
