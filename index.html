@@ -40,12 +40,16 @@
     <button id="redoBtn" title="⌘/Ctrl+Shift+Z">Redo</button>
     <button id="saveBtn">Download JSON</button>
     <button id="loadBtn">Load JSON</button>
+    <button id="pngBtn">Export PNG</button>
 
     <div class="legend" id="legend"></div>
   </header>
 
   <main>
-    <canvas id="grid"></canvas>
+    <div id="stage" style="position:relative; display:inline-block;">
+      <canvas id="grid"></canvas>
+      <canvas id="overlay" style="position:absolute; left:0; top:0; pointer-events:none;"></canvas>
+    </div>
   </main>
 
   <input type="file" id="fileInput" accept="application/json" hidden />
@@ -72,9 +76,16 @@
     const history = []; // stack of {idx, prev, next}
     const redoStack = [];
 
+    // Rectangle-draw state
+    let rectMode = false;
+    let rectStart = null; // {x,y}
+    let rectEnd = null;   // {x,y}
+
     // --- DOM ---
     const canvas = document.getElementById('grid');
     const ctx = canvas.getContext('2d', { alpha: false });
+    const overlay = document.getElementById('overlay');
+    const octx = overlay.getContext('2d');
     const select = document.getElementById('functionSelect');
     const legend = document.getElementById('legend');
     const clearBtn = document.getElementById('clearBtn');
@@ -83,11 +94,14 @@
     const fileInput = document.getElementById('fileInput');
     const undoBtn = document.getElementById('undoBtn');
     const redoBtn = document.getElementById('redoBtn');
+    const pngBtn = document.getElementById('pngBtn');
     const cellSizeInput = document.getElementById('cellSize');
 
     function resizeCanvas() {
       canvas.width = COLS * cell;
       canvas.height = ROWS * cell;
+      overlay.width = canvas.width;
+      overlay.height = canvas.height;
       drawAll();
     }
 
@@ -195,24 +209,79 @@
       ctx.restore();
     }
 
-    // Pointer handling (click & drag paint, right-click = erase)
+    // Rectangle helpers
+    function rectFromPoints(a, b) {
+      const x1 = Math.min(a.x, b.x), y1 = Math.min(a.y, b.y);
+      const x2 = Math.max(a.x, b.x), y2 = Math.max(a.y, b.y);
+      return { x1, y1, x2, y2 };
+    }
+
+    function drawRectPreview(a, b) {
+      octx.clearRect(0,0,overlay.width, overlay.height);
+      const r = rectFromPoints(a,b);
+      octx.lineWidth = 2;
+      octx.strokeStyle = 'rgba(255,255,255,0.9)';
+      octx.strokeRect(r.x1*cell + 0.5, r.y1*cell + 0.5, (r.x2 - r.x1 + 1)*cell, (r.y2 - r.y1 + 1)*cell);
+      octx.fillStyle = 'rgba(255,255,255,0.12)';
+      octx.fillRect(r.x1*cell, r.y1*cell, (r.x2 - r.x1 + 1)*cell, (r.y2 - r.y1 + 1)*cell);
+    }
+
+    function clearOverlay() {
+      octx.clearRect(0,0,overlay.width, overlay.height);
+    }
+
+    function fillRectCells(a, b, funcIdx) {
+      const r = rectFromPoints(a,b);
+      for (let y = r.y1; y <= r.y2; y++) {
+        for (let x = r.x1; x <= r.x2; x++) {
+          paintAt(x, y, funcIdx);
+        }
+      }
+    }
+
+    // Pointer handling (freehand + Shift rectangle)
     let painting = false;
     let paintIdx = palette.get(activeKey).idx;
 
     canvas.addEventListener('pointerdown', (e) => {
       canvas.setPointerCapture(e.pointerId);
       const {x,y} = xyFromClient(e.clientX, e.clientY);
+
+      if (e.shiftKey) {
+        rectMode = true;
+        rectStart = { x, y };
+        rectEnd = { x, y };
+        drawRectPreview(rectStart, rectEnd);
+        return;
+      }
+
       paintIdx = (e.button === 2 || e.ctrlKey) ? 0 : palette.get(activeKey).idx;
       painting = true; paintAt(x,y,paintIdx);
     });
 
     canvas.addEventListener('pointermove', (e) => {
-      if (!painting) return;
       const {x,y} = xyFromClient(e.clientX, e.clientY);
+      if (rectMode) {
+        rectEnd = { x, y };
+        drawRectPreview(rectStart, rectEnd);
+        return;
+      }
+      if (!painting) return;
       paintAt(x,y,paintIdx);
     });
 
-    window.addEventListener('pointerup', (e) => { painting = false; });
+    window.addEventListener('pointerup', (e) => {
+      if (rectMode) {
+        clearOverlay();
+        const funcIdx = palette.get(activeKey).idx;
+        fillRectCells(rectStart, rectEnd, funcIdx);
+        rectMode = false;
+        rectStart = rectEnd = null;
+        return;
+      }
+      painting = false;
+    });
+
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
     // Keyboard shortcuts
@@ -259,12 +328,20 @@
       }
     });
 
+    // PNG export
+    pngBtn.addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL('image/png');
+      a.download = 'pixel-canvas.png';
+      a.click();
+    });
+
     // Initial paint
     resizeCanvas();
   </script>
 
   <footer style="padding:12px 16px; color:#94a3b8;">
-    Tips: Click & drag to paint. Right‑click (or hold Ctrl) to erase. <span class="kbd">Ctrl/⌘+Z</span> to undo, <span class="kbd">Ctrl/⌘+Shift+Z</span> to redo.
+    Tips: Click & drag to paint. Hold <span class="kbd">Shift</span> then drag to draw a filled rectangle. Right‑click (or hold Ctrl) to erase. <span class="kbd">Ctrl/⌘+Z</span> to undo, <span class="kbd">Ctrl/⌘+Shift+Z</span> to redo.
   </footer>
 </body>
 </html>
